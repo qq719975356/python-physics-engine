@@ -1,12 +1,20 @@
-from tkinter import *
 import sys
 import time
 import math
 import random
+from tkinter import *
+from win32api import *
 class V:
     def __init__(self,x,y):
         self.x = x
         self.y = y
+    def set(self,x,y):
+        self.x = x
+        self.y = y
+    def __eq__(self,other):
+        if not isinstance(other,V):
+            return False
+        return self.x==other.x and self.y==other.y
     def __neg__(self):
         return V(-self.x,-self.y)
     def __add__(self,other): #V+V
@@ -30,6 +38,8 @@ class V:
         return V(-other*self.y,other*self.x)
     def __str__(self): #str(V)
         return ('({}, {})'.format(self.x, self.y))
+    def clone(self):
+        return V(self.x,self.y)
     def mag(self): 
         return math.sqrt(self.x * self.x + self.y * self.y)
     def mag_sq(self):
@@ -44,11 +54,12 @@ class V:
             return V(self.x / m,self.y / m)
         else:
             return V(0,0)
+def CalculateTriangleArea(a,b,c):
+    return abs(0.5*(a.x*(b.y-c.y)+b.x*(c.y-a.y)+c.x*(a.y-b.y)))
 class Impulus:
     def __init__(self,vec,pos):
         self.vec=vec
         self.pos=pos
-
 class AABB:
     def __init__(self,minX,maxX,minY,maxY):
         self.minX=minX
@@ -70,7 +81,7 @@ class Entity:
     #e: coefficient of restitution
     #v: linear  velocity
     #w: angular velocity 
-    def __init__(self,canvas,m=0,x=0,y=0,rot=0,dynamic=True,e=1,v=V(0,0),w=0):
+    def __init__(self,world,canvas,m=0,x=0,y=0,rot=0,dynamic=True,e=1,v=V(0,0),w=0):
         self.pos = V(x,y)
         self.rot = rot
         if dynamic:
@@ -90,7 +101,9 @@ class Entity:
         self.canvas = canvas
         self.impuluses = []
         self.aabb=AABB(0,0,0,0)
-
+        self.world=world
+        self.deleteMe=False
+        self.shape=None
     def velocityAt(self,pos):
         relPos=pos-self.pos
         return self.v+V(-relPos.y,relPos.x)*self.w
@@ -100,17 +113,25 @@ class Entity:
         raise Exception("abstract method called")
     def calculateInertia(self):
         raise Exception("abstract method called")
+    def setColor(self,color):
+        self.canvas.itemconfig(self.shape, fill=color)
 class Ball(Entity):
-    def __init__(self,canvas,m=0,x=0,y=0,rot=0,dynamic=True,e=1,v=V(0,0),w=0,r=10):
-        Entity.__init__(self,canvas,m,x,y,rot,dynamic,e,v,w)
+    def __init__(self,world,canvas,m=0,x=0,y=0,rot=0,dynamic=True,e=1,v=V(0,0),w=0,r=10,color="#FFFFFF"):
+        Entity.__init__(self,world,canvas,m,x,y,rot,dynamic,e,v,w)
+        self.color=color
         self.r = r
+        self.r2=r*r
+        self.area=math.pi*self.r2
         self.updateAABB()
-        self.shape = self.canvas.create_oval(x - r,y - r,x + r,y + r)
+        self.shape = self.canvas.create_oval(x - r,y - r,x + r,y + r,outline=world.color)
         if self.dynamic:
             self.I=self.calculateInertia()
             self.rI=1/self.I
+            print("Ball created")
+            print("area    = "+str(self.area))
             print("mass    = "+str(self.m))
             print("Inertia = "+str(self.I))
+        self.setColor(color)
     def calculateInertia(self):
         return self.m*self.r*self.r/2
     def updateAABB(self):
@@ -125,13 +146,15 @@ class Ball(Entity):
         self.updateAABB()
         self.canvas.coords(self.shape,self.pos.x-self.r,self.pos.y-self.r,self.pos.x+self.r,self.pos.y+self.r)
 class Polygon(Entity):
-    def __init__(self,canvas,m=0,x=0,y=0,rot=0,dynamic=True,e=1,v=V(0,0),w=0,verteies=None):#verteies will be stored clockwise
+    def __init__(self,world,canvas,m=0,x=0,y=0,rot=0,dynamic=True,e=1,v=V(0,0),w=0,verteies=None,color="#FFFFFF"):#verteies will be stored clockwise
         if len(verteies)<3:
             raise Exception("polygon.verteies argument invalid")
-        Entity.__init__(self,canvas,m,x,y,rot,dynamic,e,v,w)
+        Entity.__init__(self,world,canvas,m,x,y,rot,dynamic,e,v,w)
+        self.color=color
         self.verteies=verteies                       #list<V>   reletive position
         self.verteiesCount=len(verteies)
-        if not Polygon.isVerteiesClockwise(verteies):
+        self.area=self.calArea()
+        if not Polygon.areVerteiesClockwise(verteies):
             self.verteies.reverse()
         self.reallocateCenterOfMass()
         self.verteies_real=[None]*len(self.verteies) #list<V>   world position
@@ -140,12 +163,25 @@ class Polygon(Entity):
         self.updateVerteciesPosition()
         self.updateNormals()
         self.updateAABB()
-        self.shape=self.canvas.create_polygon(self.verteies_draw,fill='white',outline='black')
+        self.shape=self.canvas.create_polygon(self.verteies_draw,fill='white',outline=world.color)
         if dynamic:
             self.I=self.calculateInertia()
             self.rI=1/self.I
+            print("Polygon created")
+            print("area    = "+str(self.area))
             print("mass    = "+str(self.m))
             print("Inertia = "+str(self.I))
+        self.setColor(color)
+    def calArea(self):
+        sum=0
+        for i in range(0,self.verteiesCount):
+            sum+=self.verteies[i]**self.verteies[(i+1)%self.verteiesCount]
+        return abs(sum/2)
+    def calAreabyVerteies(vert):
+        sum=0
+        for i in range(0,len(vert)):
+            sum+=vert[i]**vert[(i+1)%len(vert)]
+        return abs(sum/2)
     def updateAABB(self):
         minX=sys.maxsize
         minY=sys.maxsize
@@ -162,7 +198,18 @@ class Polygon(Entity):
                 maxY=vertex.y
         self.aabb.set(minX,maxX,minY,maxY)
     def reallocateCenterOfMass(self):
-        print("Polygon.reallocateCenterOfMass not implemented")
+        cx=0
+        cy=0
+        for i in range(0,self.verteiesCount):
+            v1=self.verteies[i]
+            v2=self.verteies[(i+1)%self.verteiesCount]
+            cx+=(v1.x+v2.x)*(v1.x*v2.y-v2.x*v1.y)
+            cy+=(v1.y+v2.y)*(v1.x*v2.y-v2.x*v1.y)
+        cx=cx/6/self.area
+        cy=cy/6/self.area
+        cp=V(cx,cy)
+        for i in range(0,self.verteiesCount):
+            self.verteies[i]-=cp
     def getUnitNormal(v1,v2):
         v=v1-v2
         return V(-v.y,v.x).unitVector()
@@ -194,7 +241,7 @@ class Polygon(Entity):
             numerator+=abs((v1**v2)*(v1*v1+v1*v2+v2*v2))
             denominator+=abs(v1**v2)
         return (self.m/6*numerator/denominator)
-    def isVerteiesClockwise(verteies):
+    def areVerteiesClockwise(verteies):
         print("Polygon.isVerteiesClockwise(verteies) not implemented")
         return True
 class Penetration:
@@ -204,11 +251,15 @@ class Penetration:
         self.normal=normal
         self.depth=depth
 class World:
-    def __init__(self,width=800,height=600,gravaty=5,worldSpeedMultiplier=1):
+    cursorMemorySize=10
+    def __init__(self,width=800,height=600,gravaty=5,worldSpeedMultiplier=1,color="#1E1E1E"):
         self.tk = Tk() #main window
+        self.tk.title('')
+        self.tk.wm_attributes('-fullscreen','true')
         self.width = width
         self.height = height
-        self.c = Canvas(self.tk,width=self.width,height=self.height,bg="white")
+        self.color=color
+        self.c = Canvas(self.tk,width=self.width,height=self.height,bg=color)
         self.c.pack()
         self.entityList = []
         self.penetrations = []
@@ -216,13 +267,44 @@ class World:
             self.gravaty = gravaty
         else:
             self.gravaty = V(0,gravaty)
+        self.g=self.gravaty.mag()
         self.worldSpeedMultiplier=worldSpeedMultiplier
         self.timeOfLastFrame = None
-    def AddEntity(self,entity):
+        self.paused = False
+        self.cursorPos=V(0,0)
+        self.cursorVelocity=V(0,0)
+        self.cursorPosHistory=[self.cursorPos]*World.cursorMemorySize
+        self.cursorPosHistoryIndex=0
+        self.updateCursorPos()
+    def addEntity(self,entity):
         if entity:
             self.entityList.append(entity)
-    def delEntity(self,index):
-        if entityList[index]:
+    def addRandomBallAtPos(self,pos,e=1,v=V(0,0)):
+        self.addEntity(self.generateRandomBallAtPos(pos,e,v=v))
+    def addRandomPolygonAtPos(self,pos,e=1,v=V(0,0)):
+        self.addEntity(self.generateRandomPolygonAtPos(pos,e=e,v=v))
+    def generateRandomBallAtPos(self,pos,e=1,v=V(0,0)):
+        radius=random.randrange(10, 70)
+        mass=radius**2*PI/10
+        return Ball(self,self.c,m=mass,x=pos.x,y=pos.y,v=v,r=radius,e=e,color=generateRandomColor())
+    def generateRandomPolygonAtPos(self,pos,maxVertexCount=7,e=1,radius=100,density=0.1,v=V(0,0)):
+        verteiesCount=random.randint(3,maxVertexCount+1)
+        vertexAngles=[0]*verteiesCount
+        verteies=[None]*verteiesCount
+        for i in range(0,verteiesCount):
+            vertexAngles[i]=random.uniform(0,2*math.pi)
+        vertexAngles.sort()
+        for i in range(0,verteiesCount):
+            verteies[i]=V(0,radius).rot(vertexAngles[i])
+        return Polygon(self,self.c,Polygon.calAreabyVerteies(verteies)*density,pos.x,pos.y,v=v,e=e,verteies=verteies,color=generateRandomColor())
+    def IsPosOutOfBound(self,pos):
+        return pos.x>self.width*2 or pos.y>self.height*2 or pos.x<-self.width or pos.y<-self.height
+    def deleteOutOfBoundEntities(self):
+        for e in self.entityList:
+            if self.IsPosOutOfBound(e.pos):
+                e.deleteMe=True
+    def delEntityAt(self,index):
+        if self.entityList[index]:
             self.c.delete(self.entityList[index].shape)
             del self.entityList[index]
         else:
@@ -232,41 +314,155 @@ class World:
             self.c.delete(self.entityList.pop().shape)
         else:
             raise Exception("entityList is empty")
-    def Start(self):
+    def start(self):
         self.timeOfLastFrame = time.clock()
         self.Loop()
+    def updateCursorPos(self):
+        self.cursorPos.set(self.tk.winfo_pointerx() - self.tk.winfo_rootx(),self.tk.winfo_pointery() - self.tk.winfo_rooty())
+        self.cursorPosHistory[self.cursorPosHistoryIndex]=self.cursorPos.clone()
+        self.cursorPosHistoryIndex=(self.cursorPosHistoryIndex+1)%World.cursorMemorySize
+        self.cursorVelocity=self.cursorPos-self.cursorPosHistory[self.cursorPosHistoryIndex]
+    def emptyCursorHistory(self):
+        self.cursorPosHistory=[self.cursorPos]*World.cursorMemorySize
+        self.cursorVelocity=V(0,0)
     def getDeltaTime(self):
         clock=time.clock()*self.worldSpeedMultiplier
         result=clock - self.timeOfLastFrame
         self.timeOfLastFrame=clock
         return result
     def Loop(self):
+        controlledEntity=None
         while True:
-            cursorX=self.tk.winfo_pointerx() - self.tk.winfo_rootx()
-            cursorY=self.tk.winfo_pointery() - self.tk.winfo_rooty()
-            print(str(cursorX)+":"+str(cursorY))
+            self.updateCursorPos()
+            if GetAsyncKeyState(27)==-32767:#esc pressed, exit
+                sys.exit()
+            if GetAsyncKeyState(32)==-32767:#space-bar pressed, pause/unpause
+                self.paused=not self.paused
+                self.emptyCursorHistory()
+            if GetAsyncKeyState(71):#g held, remove entities
+                for i in reversed(range(0,len(self.entityList))):
+                    if self.checkContainPoint(self.entityList[i],self.cursorPos):
+                        self.delEntityAt(i)
+            if self.paused:
+                self.getDeltaTime()
+                self.tk.update()
+                continue
             dt = self.getDeltaTime()
-            for e in self.entityList:
+            self.deleteOutOfBoundEntities()
+            self.removeDeletedEntities()
+            if controlledEntity:
+                if GetAsyncKeyState(104): #numpad 8 held, controlled entity acc up
+                    controlledEntity.v = controlledEntity.v + 30 * V(0,-1)*dt
+                if GetAsyncKeyState(102): #numpad 6 held, controlled entity acc right
+                    controlledEntity.v = controlledEntity.v + 30 * V(1, 0)*dt
+                if GetAsyncKeyState(101): #numpad 5 held, controlled entity acc down
+                    controlledEntity.v = controlledEntity.v + 30 * V(0, 1)*dt
+                if GetAsyncKeyState(100): #numpad 4 held, controlled entity acc left
+                    controlledEntity.v = controlledEntity.v + 30 * V(-1,0)*dt
+                if GetAsyncKeyState(105): #numpad 9 held, controlled entity acc clockwise spin
+                    controlledEntity.w = controlledEntity.w + 0.3*dt
+                if GetAsyncKeyState(103): #numpad 7 held, controlled entity acc conter-clockwise spin
+                    controlledEntity.w = controlledEntity.w - 0.3*dt   
+                if GetAsyncKeyState(96): #numpad 0 held, repel every other entity
+                    for e in self.entityList:
+                        if e.dynamic and e is not controlledEntity:
+                            e.v = e.v - 0.1 * (controlledEntity.pos-e.pos)*dt
+                if GetAsyncKeyState(97): #numpad 1 held, attract every other entity
+                    for e in self.entityList:
+                        if e.dynamic and e is not controlledEntity:
+                            e.v = e.v + 0.1 * (controlledEntity.pos-e.pos)*dt
+            if GetAsyncKeyState(65):#a held, acc left
+                for e in self.entityList:
+                    if e.dynamic:
+                        e.v = e.v + 10 * V(-1,0)*dt
+            if GetAsyncKeyState(83):#s held, acc down
+                for e in self.entityList:
+                    if e.dynamic:
+                        e.v = e.v + 10 * V(0,1)*dt
+            if GetAsyncKeyState(68):#d held, acc right
+                for e in self.entityList:
+                    if e.dynamic:
+                        e.v = e.v + 10 * V(1,0)*dt
+            if GetAsyncKeyState(87):#w held, acc up
+                for e in self.entityList:
+                    if e.dynamic:
+                        e.v = e.v + 10 * V(0,-1)*dt
+            if GetAsyncKeyState(70)==-32767:#f pressed, velocity and angular velocity flip
+                for e in self.entityList:
+                    if e.dynamic:
+                        e.v=-e.v
+                        e.w=-e.w
+            if GetAsyncKeyState(88):#x held, dec towards current velocity and angular velocity
+                for e in self.entityList:
+                    if e.dynamic:
+                        e.v = e.v*(1-0.4*dt)
+                        e.w = e.w*(1-0.4*dt)
+            if GetAsyncKeyState(81):#q held, acc towards current velocity and angular velocity
+                for e in self.entityList:
+                    if e.dynamic:
+                        e.v = e.v*(0.4*dt+1)
+                        e.w = e.w*(1-0.4*dt)
+            if GetAsyncKeyState(90):#z held, acc randomly
+                for e in self.entityList:
+                    if e.dynamic:
+                        e.v = e.v + 300*V(random.uniform(-1,1),random.uniform(-1,1))*dt
+            if GetAsyncKeyState(82)==-32767:#r pressed, reverse gravity
+                if self.gravaty==V(0,0):
+                    self.gravaty=V(self.g,0)
+                self.gravaty=-self.gravaty
+            if GetAsyncKeyState(84)==-32767:#t pressed, enable/disable gravaty
+                self.gravaty=V(0,self.g) if self.gravaty==V(0,0) else V(0,0)
+            if GetAsyncKeyState(67)==-32767:#c pressed, add ball at cursor pos with cursor velocity
+                self.addRandomBallAtPos(self.cursorPos,v=self.cursorVelocity)
+            if GetAsyncKeyState(86)==-32767:#v pressed, add poly at cursor pos with cursor velocity
+                self.addRandomPolygonAtPos(self.cursorPos,v=self.cursorVelocity)
+            if GetAsyncKeyState(1):#left-mouse down, attract entities
+                for e in self.entityList:
+                    if e.dynamic:
+                        e.v = e.v + 0.1 * (self.cursorPos-e.pos)*dt
+            if GetAsyncKeyState(2):#right-mouse down, repel entities
+                for e in self.entityList:
+                    if e.dynamic:
+                        e.v = e.v - 0.1 * (self.cursorPos-e.pos)*dt
+            if GetAsyncKeyState(4):#mid-mouse down, select/de-select entity to be controlled
+                foundEntity=False
+                for i in reversed(range(0,len(self.entityList))):
+                    if self.checkContainPoint(self.entityList[i],self.cursorPos):
+                        if controlledEntity:
+                            controlledEntity.setColor(controlledEntity.color)
+                        controlledEntity=self.entityList[i]
+                        controlledEntity.setColor("#000000")
+                        foundEntity=True
+                        break
+                if not foundEntity:
+                    if controlledEntity:
+                        controlledEntity.setColor(controlledEntity.color)
+                    controlledEntity=None
+            for e in self.entityList:#apply gravaty
                 if e.dynamic:
                     if self.gravaty:
                         e.v = e.v + self.gravaty*dt
                     e.update(dt)
-            for i in range(0,len(self.entityList)):
+            for i in range(0,len(self.entityList)):#check collision
                 for j in range(i + 1,len(self.entityList)):
                     if self.entityList[i].dynamic or self.entityList[j].dynamic:
-                        if self.CheckCollision(self.entityList[i],self.entityList[j]):
+                        if self.checkCollision(self.entityList[i],self.entityList[j]):
                             #print("\a")
                             pass
-            while self.penetrations:
+            while self.penetrations:#un-penetrate
                 self.unpenetrate(self.penetrations.pop())
-            self.tk.update()
+            self.tk.update()#update this frame
+    def removeDeletedEntities(self):
+        for i in reversed(range(len(self.entityList))):
+            if self.entityList[i].deleteMe:
+                self.delEntityAt(i)
     def unpenetrate(self,penetration):#e1 will move towards normal
         e1=penetration.e1
         e2=penetration.e2
         correction = penetration.depth / (e1.rm + e2.rm) * penetration.normal *0.5
         e1.pos += e1.rm * correction
         e2.pos -= e2.rm * correction
-    def CheckCollision_ball_ball(self,b1,b2):
+    def checkCollision_ball_ball(self,b1,b2):
         dis = b1.pos - b2.pos
         if (b1.r + b2.r)**2 < dis.mag_sq():
             return False
@@ -281,7 +477,7 @@ class World:
             b2.impuluses.append(Impulus(vec=impulus,pos=None))
             self.penetrations.append(Penetration(b1,b2,normal,b1.r+b2.r-dis.mag()))
             return True
-    def CheckCollision_ball_poly(self,b1,p1):
+    def checkCollision_ball_poly(self,b1,p1):
         minPenetrationDepth=sys.maxsize
         minPenetrationNormal=None
         collisionPos=None
@@ -340,7 +536,7 @@ class World:
         b1.impuluses.append(Impulus(vec=impulus,pos=collisionPos))
         p1.impuluses.append(Impulus(vec=-impulus,pos=collisionPos))
         return True
-    def CheckCollision_poly_poly(self,p1,p2):
+    def checkCollision_poly_poly(self,p1,p2):
         minPenetrationDepth=sys.maxsize
         minPenetrationNormal=None
         collisionPos=None
@@ -432,49 +628,91 @@ class World:
         p1.impuluses.append(Impulus(vec=impulus,pos=collisionPos))
         p2.impuluses.append(Impulus(vec=-impulus,pos=collisionPos))
         return True
-    def CheckCollision(self,e1,e2):
+    def checkCollision_ball_V(self,b,v):
+        return (b.pos-v).mag_sq()<b.r2
+    def checkCollision_poly_V(self,p,v):
+        areaSum=0
+        for i in range(0,p.verteiesCount):
+            v1=p.verteies_real[i]
+            v2=p.verteies_real[(i+1)%p.verteiesCount]
+            areaSum+=CalculateTriangleArea(v1,v2,v)
+        if areaSum>p.area*1.01:
+            return False
+        return True
+    def checkCollision_poly_V_by_verteies(vert,v,area):
+        areaSum=0
+        for i in range(0,len(vert)):
+            v1=vert[i]
+            v2=vert[(i+1)%len(vert)]
+            areaSum+=CalculateTriangleArea(v1,v2,v)
+        if areaSum>area:
+            return False
+        return True
+    def checkContainPoint(self,e,v):
+        if isinstance(e,Ball):
+            return self.checkCollision_ball_V(e,v)
+        if isinstance(e,Polygon):
+            return self.checkCollision_poly_V(e,v)
+    def checkCollision(self,e1,e2):
+        #if isinstance(e1,V):
+        #    if isinstance(e2,Ball):
+        #        return self.CheckCollision_ball_V(e2,e1)
+        #    if isinstance(e2,Polygon):
+        #        return self.CheckCollision_poly_V(e2,e1)
+        #if isinstance(e2,V):
+        #    if isinstance(e1,Ball):
+        #        return self.CheckCollision_ball_V(e1,e2)
+        #    if isinstance(e1,Polygon):
+        #        return self.CheckCollision_poly_V(e1,e2)
         if AABB.noIntersect(e1.aabb,e2.aabb):
             return False
         if isinstance(e1,Ball):
             if isinstance(e2,Polygon):
-                return self.CheckCollision_ball_poly(e1,e2)
+                return self.checkCollision_ball_poly(e1,e2)
             if isinstance(e2,Ball):
-                return self.CheckCollision_ball_ball(e1,e2)
+                return self.checkCollision_ball_ball(e1,e2)
         elif isinstance(e1,Polygon):
             if isinstance(e2,Polygon):
-                return self.CheckCollision_poly_poly(e1,e2)
+                return self.checkCollision_poly_poly(e1,e2)
             if isinstance(e2,Ball):
-                return self.CheckCollision_ball_poly(e2,e1)
-HEIGHT = 1000
+                return self.checkCollision_ball_poly(e2,e1)
+HEIGHT = 1080
 WIDTH = 1920
-PI=3.1415926
-def createBalls(w,numBalls=100,e=0.5):
+PI=math.pi
+def generateRandomColor(min=150,max=255):
+    r=random.randint(min,max)
+    g=random.randint(min,max)
+    b=random.randint(min,max)
+    if (r-g)**2+(g-b)**2+(b-r)**2*40<(max-min)**2:
+        return generateRandomColor(min,max)
+    return '#%02x%02x%02x' % tuple([r,g,b])
+def createBalls(w,numBalls=100,e=1):
     for i in range(0,numBalls):
         radius=random.randrange(10, 70)
         mass=radius**2*PI/10
-        w.AddEntity(Ball(w.c,m=mass,x=random.randrange(150, WIDTH - 150),y=random.randrange(150,HEIGHT - 150),v=V(random.randrange(-3,3),random.randrange(-30,30)),r=radius,e=e))
+        w.addEntity(Ball(w,w.c,m=mass,x=random.randrange(150, WIDTH - 150),y=random.randrange(150,HEIGHT - 150),v=V(random.randrange(-3,3),random.randrange(-30,30)),r=radius,e=e,color=generateRandomColor()))
         for j in range(0,len(w.entityList) - 1):
-            if w.CheckCollision(w.entityList[-1],w.entityList[j]):
+            if w.checkCollision(w.entityList[-1],w.entityList[j]):
                 w.delLastEntity()
 def createContainerBalls(w):
     for i in range(1,8):
-        w.AddEntity(Ball(w.c,m=100,x=WIDTH / 8 * i,y=0,v=V(0,0),r=WIDTH / 12,dynamic=FALSE))
-        w.AddEntity(Ball(w.c,m=100,x=WIDTH / 8 * i,y=HEIGHT,v=V(0,0),r=WIDTH / 12,dynamic=FALSE))
+        w.AddEntity(Ball(w,w.c,m=100,x=WIDTH / 8 * i,y=0,v=V(0,0),r=WIDTH / 12,dynamic=FALSE))
+        w.AddEntity(Ball(w,w.c,m=100,x=WIDTH / 8 * i,y=HEIGHT,v=V(0,0),r=WIDTH / 12,dynamic=FALSE))
     for i in range(1,8):
-        w.AddEntity(Ball(w.c,m=100,x=0,y=HEIGHT / 8 * i,v=V(0,0),r=WIDTH / 12,dynamic=FALSE))
-        w.AddEntity(Ball(w.c,m=100,x=WIDTH,y=HEIGHT / 8 * i,v=V(0,0),r=WIDTH / 12,dynamic=FALSE))
+        w.AddEntity(Ball(w,w.c,m=100,x=0,y=HEIGHT / 8 * i,v=V(0,0),r=WIDTH / 12,dynamic=FALSE))
+        w.AddEntity(Ball(w,w.c,m=100,x=WIDTH,y=HEIGHT / 8 * i,v=V(0,0),r=WIDTH / 12,dynamic=FALSE))
 def createContainerRects(w):
-    w.AddEntity(Polygon(w.c,m=100,x=WIDTH/2,y=HEIGHT,v=V(0,0),dynamic=False,verteies=[V(-WIDTH/2,-20),V(WIDTH/2,-20),V(WIDTH/2,20),V(-WIDTH/2,20)]))
-    w.AddEntity(Polygon(w.c,m=100,x=WIDTH/2,y=0,v=V(0,0),dynamic=False,verteies=[V(-WIDTH/2,-20),V(WIDTH/2,-20),V(WIDTH/2,20),V(-WIDTH/2,20)]))
-    w.AddEntity(Polygon(w.c,m=100,x=0,y=HEIGHT/2,v=V(0,0),dynamic=False,verteies=[V(-20,-HEIGHT/2),V(20,-HEIGHT/2),V(20,HEIGHT/2),V(-20,HEIGHT/2)]))
-    w.AddEntity(Polygon(w.c,m=100,x=WIDTH,y=HEIGHT/2,v=V(0,0),dynamic=False,verteies=[V(-20,-HEIGHT/2),V(20,-HEIGHT/2),V(20,HEIGHT/2),V(-20,HEIGHT/2)]))
-def createSquares(w,numSquares=100,e=0.5):
+    w.addEntity(Polygon(w,w.c,m=100,x=WIDTH/2,y=HEIGHT,v=V(0,0),dynamic=False,verteies=[V(-WIDTH/2,-20),V(WIDTH/2,-20),V(WIDTH/2,20),V(-WIDTH/2,20)],color='#101010'))
+    w.addEntity(Polygon(w,w.c,m=100,x=WIDTH/2,y=0,v=V(0,0),dynamic=False,verteies=[V(-WIDTH/2,-20),V(WIDTH/2,-20),V(WIDTH/2,20),V(-WIDTH/2,20)],color='#101010'))
+    w.addEntity(Polygon(w,w.c,m=100,x=0,y=HEIGHT/2,v=V(0,0),dynamic=False,verteies=[V(-20,-HEIGHT/2),V(20,-HEIGHT/2),V(20,HEIGHT/2),V(-20,HEIGHT/2)],color='#101010'))
+    w.addEntity(Polygon(w,w.c,m=100,x=WIDTH,y=HEIGHT/2,v=V(0,0),dynamic=False,verteies=[V(-20,-HEIGHT/2),V(20,-HEIGHT/2),V(20,HEIGHT/2),V(-20,HEIGHT/2)],color='#101010'))
+def createSquares(w,numSquares=100,e=1):
     for i in range(0,numSquares):
         a=random.randrange(10, 70)
         mass=a**2/10
-        w.AddEntity(Polygon(w.c,e=e,m=mass,x=random.randrange(150, WIDTH - 150),y=random.randrange(150,HEIGHT - 150),rot=random.randrange(-3,3),v=V(random.randrange(-3,3),random.randrange(-30,30)),w=random.randrange(-3,3),verteies=[V(-a,-a),V(a,-a),V(a,a),V(-a,a)]))
+        w.addEntity(Polygon(w,w.c,e=e,m=mass,x=random.randrange(150, WIDTH - 150),y=random.randrange(150,HEIGHT - 150),rot=random.randrange(-3,3),v=V(random.randrange(-3,3),random.randrange(-30,30)),w=random.randrange(-3,3),color=generateRandomColor(),verteies=[V(-a,-a),V(a,-a),V(a,a),V(-a,a)]))
         for j in range(0,len(w.entityList) - 1):
-            if w.CheckCollision(w.entityList[-1],w.entityList[j]):
+            if w.checkCollision(w.entityList[-1],w.entityList[j]):
                 w.delLastEntity()
 def main():
     world = World(WIDTH,HEIGHT,gravaty=10,worldSpeedMultiplier=10)
@@ -486,5 +724,5 @@ def main():
     #w.AddEntity(Polygon(w.c,m=10,x=650,y=400,rot=0,v=V(-10,-5),w=1,verteies=[V(0,30),V(-20,20),V(-30,0),V(-20,-20),V(0,-30),V(20,-20),V(30,0),V(20,20)]))
     #createContainerBalls(w)
     createContainerRects(world)
-    world.Start()
+    world.start()
 main()
